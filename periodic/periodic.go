@@ -140,7 +140,8 @@ type RunnerOptions struct {
 	// Optional run id; used by the server to identify runs.
 	RunID int64
 	// Optional Offect Duration; to offset the histogram function duration
-	Offset time.Duration
+	Offset       time.Duration
+	AccessLogger *AccessLogger
 }
 
 // RunnerResults encapsulates the actual QPS observed and duration histogram.
@@ -416,7 +417,6 @@ func (r *periodicRunner) Run() RunnerResults {
 	functionDuration := stats.NewHistogram(r.Offset.Seconds(), r.Resolution)
 	// Histogram and stats for Sleep time (negative offset to capture <0 sleep in their own bucket):
 	sleepTime := stats.NewHistogram(-0.001, 0.001)
-	_ = os.Mkdir("/tmp/fortio", 0755)
 	if r.NumThreads <= 1 {
 		log.LogVf("Running single threaded")
 		runOne(0, runnerChan, functionDuration, sleepTime, numCalls+leftOver, start, r)
@@ -494,6 +494,32 @@ func (r *periodicRunner) Run() RunnerResults {
 	return result
 }
 
+type AccessLogger struct {
+	mu     sync.Mutex
+	file   *os.File
+	format string
+}
+
+func NewAccessLogger(file, format string) (*AccessLogger, error) {
+	f, err := os.OpenFile(file, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		return nil, err
+	}
+	return &AccessLogger{file: f, format: format}, nil
+}
+
+func (a *AccessLogger) Report(thread int, time int64, latency float64) {
+	a.mu.Lock()
+	switch a.format {
+	case "influx":
+		// https://docs.influxdata.com/influxdb/v2.1/reference/syntax/line-protocol/
+		fmt.Fprintf(a.file, `latency,thread=%d value=%f %d`+"\n", thread, latency, time)
+	case "json", "":
+		fmt.Fprintf(a.file, `{"latency":%f,"timestamp":%d,"thread":%d}`+"\n", latency, time, thread)
+	}
+	a.mu.Unlock()
+}
+
 var report = func() func(thread int, time int64, latency float64) {
 	f, err := os.OpenFile("/tmp/access-logs", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
@@ -547,8 +573,11 @@ MainLoop:
 		}
 		f.Run(id)
 		latency := time.Since(fStart).Seconds()
+		if r.AccessLogger != nil {
+			r.AccessLogger.Report(id, fStart.UnixNano(), latency)
+		}
 		report(id, fStart.UnixNano(), latency)
-		funcTimes.Record(time.Since(fStart).Seconds())
+		funcTimes.Record(latency)
 		i++
 		// if using QPS / pre calc expected call # mode:
 		if useQPS { // nolint: nestif
