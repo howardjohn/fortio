@@ -416,6 +416,7 @@ func (r *periodicRunner) Run() RunnerResults {
 	functionDuration := stats.NewHistogram(r.Offset.Seconds(), r.Resolution)
 	// Histogram and stats for Sleep time (negative offset to capture <0 sleep in their own bucket):
 	sleepTime := stats.NewHistogram(-0.001, 0.001)
+	_ = os.Mkdir("/tmp/fortio", 0755)
 	if r.NumThreads <= 1 {
 		log.LogVf("Running single threaded")
 		runOne(0, runnerChan, functionDuration, sleepTime, numCalls+leftOver, start, r)
@@ -493,6 +494,20 @@ func (r *periodicRunner) Run() RunnerResults {
 	return result
 }
 
+var report = func() func(thread int, time int64, latency float64) {
+	f, err := os.OpenFile("/tmp/access-logs", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		panic(err.Error())
+	}
+	mu := sync.Mutex{}
+	return func(thread int, time int64, latency float64) {
+		mu.Lock()
+		//fmt.Fprintf(f, `{"latency":%f,"timestamp":%d,"thread":%d}`+"\n", latency, time, thread)
+		fmt.Fprintf(f, `latency,run=test,thread=%d value=%f %d`+"\n", thread, latency, time)
+		mu.Unlock()
+	}
+}()
+
 // runOne runs in 1 go routine (or main one when -c 1 == single threaded mode).
 // nolint: gocognit // we should try to simplify it though.
 func runOne(id int, runnerChan chan struct{},
@@ -502,7 +517,6 @@ func runOne(id int, runnerChan chan struct{},
 	tIDStr := fmt.Sprintf("T%03d", id)
 	perThreadQPS := r.QPS / float64(r.NumThreads)
 	useQPS := (perThreadQPS > 0)
-
 	hasDuration := (r.Duration > 0)
 	useExactly := (r.Exactly > 0)
 	f := r.Runners[id]
@@ -532,6 +546,8 @@ MainLoop:
 			}
 		}
 		f.Run(id)
+		latency := time.Since(fStart).Seconds()
+		report(id, fStart.UnixNano(), latency)
 		funcTimes.Record(time.Since(fStart).Seconds())
 		i++
 		// if using QPS / pre calc expected call # mode:
