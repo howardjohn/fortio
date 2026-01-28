@@ -52,7 +52,7 @@ import (
 
 // fortio's help/args message.
 func helpArgsString() string {
-	return fmt.Sprintf("target\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s",
+	return fmt.Sprintf("target\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s",
 		"where command is one of: load (load testing), server (starts ui, rest api,",
 		" http-echo, redirect, proxies, tcp-echo, udp-echo and grpc ping servers), ",
 		" tcp-echo (only the tcp-echo server), udp-echo (only udp-echo server),",
@@ -62,7 +62,7 @@ func helpArgsString() string {
 		" or script (interactive grol script mode or script file),",
 		" or version (prints the full version and build details).",
 		"where target is a URL (http load tests) or host:port (grpc health test),",
-		" or tcp://host:port (tcp load test), or udp://host:port (udp load test).",
+		" or tcp://host:port (tcp load test), or udp://host:port (udp load test),",
 		" or mcp://host:port/path (mcp load test).")
 }
 
