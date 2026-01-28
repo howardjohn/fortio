@@ -114,7 +114,7 @@ var (
 	mcpToolFlag     = flag.String("mcp-tool", "", "MCP tool name to call")
 	mcpArgsFlag     = flag.String("mcp-args", "{}", "MCP tool arguments as JSON string")
 	proxies         = make([]string, 0)
-	httpMulties = make([]string, 0)
+	httpMulties     = make([]string, 0)
 
 	allowInitialErrorsFlag = flag.Bool("allow-initial-errors", false, "Allow and don't abort on initial warmup errors")
 	abortOnFlag            = flag.Int("abort-on", 0,

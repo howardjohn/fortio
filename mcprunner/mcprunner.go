@@ -130,18 +130,18 @@ func NewMCPClient(o *MCPOptions) (*MCPClient, error) {
 		httpClient: &http.Client{
 			Timeout: o.ReqTimeout,
 		},
-		url:      o.URL,
-		tool:     o.Tool,
-		sessions: o.Sessions,
+		url:        o.URL,
+		tool:       o.Tool,
+		sessions:   o.Sessions,
 		reqTimeout: o.ReqTimeout,
 	}
-	
+
 	if o.ReqTimeout == 0 {
 		log.Debugf("Request timeout not set, using default %v", fhttp.HTTPReqTimeOutDefaultValue)
 		c.reqTimeout = fhttp.HTTPReqTimeOutDefaultValue
 		c.httpClient.Timeout = c.reqTimeout
 	}
-	
+
 	// Parse args JSON
 	if o.Args != "" {
 		if err := json.Unmarshal([]byte(o.Args), &c.args); err != nil {
@@ -150,7 +150,7 @@ func NewMCPClient(o *MCPOptions) (*MCPClient, error) {
 	} else {
 		c.args = make(map[string]interface{})
 	}
-	
+
 	return c, nil
 }
 
@@ -158,7 +158,7 @@ func NewMCPClient(o *MCPOptions) (*MCPClient, error) {
 func (c *MCPClient) Initialize(connID int) error {
 	c.sessionIDs = make([]string, c.sessions)
 	c.requestIDBase = int64(connID) * 1000000 // offset by connection ID to avoid conflicts
-	
+
 	for i := 0; i < c.sessions; i++ {
 		// Send initialize request
 		initParams := InitializeParams{
@@ -171,47 +171,47 @@ func (c *MCPClient) Initialize(connID int) error {
 				Version: "1.0",
 			},
 		}
-		
+
 		initReq := JSONRPCRequest{
 			JSONRPC: "2.0",
 			Method:  "initialize",
 			Params:  initParams,
 			ID:      c.nextRequestID(),
 		}
-		
+
 		initResp, err := c.sendRequest(&initReq)
 		if err != nil {
 			return fmt.Errorf("initialize request failed for session %d: %w", i, err)
 		}
-		
+
 		if initResp.Error != nil {
 			return fmt.Errorf("initialize error for session %d: %s", i, initResp.Error.Message)
 		}
-		
+
 		// Parse initialize response to get session info if provided
 		var initResult InitializeResult
 		if err := json.Unmarshal(initResp.Result, &initResult); err != nil {
 			return fmt.Errorf("failed to parse initialize response for session %d: %w", i, err)
 		}
-		
+
 		// Store session identifier (use request ID as session ID for simplicity)
 		c.sessionIDs[i] = fmt.Sprintf("session-%d-%d", connID, i)
-		
+
 		// Send initialized notification
 		initializedNotif := JSONRPCRequest{
 			JSONRPC: "2.0",
 			Method:  "notifications/initialized",
 			Params:  map[string]interface{}{},
 		}
-		
+
 		// Notifications don't have IDs and don't expect responses
 		if err := c.sendNotification(&initializedNotif); err != nil {
 			return fmt.Errorf("initialized notification failed for session %d: %w", i, err)
 		}
-		
+
 		log.Debugf("Initialized session %d: %s", i, c.sessionIDs[i])
 	}
-	
+
 	return nil
 }
 
@@ -226,35 +226,35 @@ func (c *MCPClient) sendRequest(req *JSONRPCRequest) (*JSONRPCResponse, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal request: %w", err)
 	}
-	
+
 	httpReq, err := http.NewRequest(http.MethodPost, c.url, bytes.NewReader(reqBody))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create HTTP request: %w", err)
 	}
-	
+
 	httpReq.Header.Set("Content-Type", "application/json")
-	
+
 	httpResp, err := c.httpClient.Do(httpReq)
 	if err != nil {
 		return nil, fmt.Errorf("HTTP request failed: %w", err)
 	}
 	defer httpResp.Body.Close()
-	
+
 	if httpResp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(httpResp.Body)
 		return nil, fmt.Errorf("HTTP error %d: %s", httpResp.StatusCode, string(body))
 	}
-	
+
 	respBody, err := io.ReadAll(httpResp.Body)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read response body: %w", err)
 	}
-	
+
 	var resp JSONRPCResponse
 	if err := json.Unmarshal(respBody, &resp); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal response: %w", err)
 	}
-	
+
 	return &resp, nil
 }
 
@@ -264,29 +264,29 @@ func (c *MCPClient) sendNotification(notif *JSONRPCRequest) error {
 	if err != nil {
 		return fmt.Errorf("failed to marshal notification: %w", err)
 	}
-	
+
 	httpReq, err := http.NewRequest(http.MethodPost, c.url, bytes.NewReader(reqBody))
 	if err != nil {
 		return fmt.Errorf("failed to create HTTP request: %w", err)
 	}
-	
+
 	httpReq.Header.Set("Content-Type", "application/json")
-	
+
 	httpResp, err := c.httpClient.Do(httpReq)
 	if err != nil {
 		return fmt.Errorf("HTTP request failed: %w", err)
 	}
 	defer httpResp.Body.Close()
-	
+
 	// For notifications, we just check the status code
 	if httpResp.StatusCode != http.StatusOK && httpResp.StatusCode != http.StatusNoContent {
 		body, _ := io.ReadAll(httpResp.Body)
 		return fmt.Errorf("HTTP error %d: %s", httpResp.StatusCode, string(body))
 	}
-	
+
 	// Drain the response body
 	_, _ = io.Copy(io.Discard, httpResp.Body)
-	
+
 	return nil
 }
 
@@ -295,29 +295,29 @@ func (c *MCPClient) CallTool() error {
 	// Round-robin through sessions
 	sessionIdx := c.currentSession % c.sessions
 	c.currentSession++
-	
+
 	// Prepare tool call request
 	toolParams := map[string]interface{}{
 		"name":      c.tool,
 		"arguments": c.args,
 	}
-	
+
 	toolReq := JSONRPCRequest{
 		JSONRPC: "2.0",
 		Method:  "tools/call",
 		Params:  toolParams,
 		ID:      c.nextRequestID(),
 	}
-	
+
 	resp, err := c.sendRequest(&toolReq)
 	if err != nil {
 		return err
 	}
-	
+
 	if resp.Error != nil {
 		return fmt.Errorf("tool call error: %s", resp.Error.Message)
 	}
-	
+
 	log.Debugf("Tool call succeeded on session %d", sessionIdx)
 	return nil
 }
@@ -344,14 +344,14 @@ func (mcpstate *RunnerResults) Run(_ context.Context, t periodic.ThreadID) (bool
 // RunMCPTest runs an MCP test and returns the aggregated stats.
 func RunMCPTest(o *RunnerOptions) (*RunnerResults, error) {
 	o.RunType = "MCP"
-	log.Infof("Starting MCP test for %s with %d threads, %d sessions per thread at %.1f qps", 
+	log.Infof("Starting MCP test for %s with %d threads, %d sessions per thread at %.1f qps",
 		o.URL, o.NumThreads, o.Sessions, o.QPS)
-	
+
 	r := periodic.NewPeriodicRunner(&o.RunnerOptions)
 	defer r.Options().Abort()
 	numThreads := r.Options().NumThreads
 	out := r.Options().Out
-	
+
 	total := RunnerResults{
 		aborter:  r.Options().Stop,
 		RetCodes: make(MCPResultMap),
@@ -360,19 +360,19 @@ func RunMCPTest(o *RunnerOptions) (*RunnerResults, error) {
 	total.Tool = o.Tool
 	total.Args = o.Args
 	total.Sessions = o.Sessions
-	
+
 	mcpstate := make([]RunnerResults, numThreads)
 	var err error
-	
+
 	// Create clients and initialize sessions
 	for i := range numThreads {
 		r.Options().Runners[i] = &mcpstate[i]
-		
+
 		mcpstate[i].client, err = NewMCPClient(&o.MCPOptions)
 		if mcpstate[i].client == nil {
 			return nil, fmt.Errorf("unable to create client %d for %s: %w", i, o.URL, err)
 		}
-		
+
 		// Warmup: Initialize sessions
 		if o.Exactly <= 0 {
 			err = mcpstate[i].client.Initialize(i)
@@ -383,14 +383,14 @@ func RunMCPTest(o *RunnerOptions) (*RunnerResults, error) {
 				log.LogVf("Initialized %d sessions for connection 0", o.Sessions)
 			}
 		}
-		
+
 		mcpstate[i].aborter = total.aborter
 		mcpstate[i].RetCodes = make(MCPResultMap)
 	}
-	
+
 	// Run the load test
 	total.RunnerResults = r.Run()
-	
+
 	// Aggregate results
 	keys := []string{}
 	for i := range numThreads {
@@ -403,17 +403,17 @@ func RunMCPTest(o *RunnerOptions) (*RunnerResults, error) {
 			total.RetCodes[k] += mcpstate[i].RetCodes[k]
 		}
 	}
-	
+
 	// Cleanup
 	r.Options().ReleaseRunners()
-	
+
 	// Print results
 	totalCount := float64(total.DurationHistogram.Count)
 	sort.Strings(keys)
 	for _, k := range keys {
-		_, _ = fmt.Fprintf(out, "mcp %s : %d (%.1f %%)\n", k, total.RetCodes[k], 
+		_, _ = fmt.Fprintf(out, "mcp %s : %d (%.1f %%)\n", k, total.RetCodes[k],
 			100.*float64(total.RetCodes[k])/totalCount)
 	}
-	
+
 	return &total, nil
 }
