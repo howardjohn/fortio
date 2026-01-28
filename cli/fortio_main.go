@@ -37,6 +37,7 @@ import (
 	"fortio.org/fortio/fhttp"
 	"fortio.org/fortio/fnet"
 	"fortio.org/fortio/grol"
+	"fortio.org/fortio/mcprunner"
 	"fortio.org/fortio/periodic"
 	"fortio.org/fortio/rapi"
 	"fortio.org/fortio/stats"
@@ -51,7 +52,7 @@ import (
 
 // fortio's help/args message.
 func helpArgsString() string {
-	return fmt.Sprintf("target\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s",
+	return fmt.Sprintf("target\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s",
 		"where command is one of: load (load testing), server (starts ui, rest api,",
 		" http-echo, redirect, proxies, tcp-echo, udp-echo and grpc ping servers), ",
 		" tcp-echo (only the tcp-echo server), udp-echo (only udp-echo server),",
@@ -61,7 +62,8 @@ func helpArgsString() string {
 		" or script (interactive grol script mode or script file),",
 		" or version (prints the full version and build details).",
 		"where target is a URL (http load tests) or host:port (grpc health test),",
-		" or tcp://host:port (tcp load test), or udp://host:port (udp load test).")
+		" or tcp://host:port (tcp load test), or udp://host:port (udp load test),",
+		" or mcp://host:port/path (mcp load test).")
 }
 
 // Attention: every flag that is common to HTTP client goes to bincommon/
@@ -107,8 +109,12 @@ var (
 	// which is now embedded in the binary thanks to that support in golang 1.16.
 	_           = flag.String("static-dir", "", "Deprecated/unused `path`.")
 	dataDirFlag = flag.String("data-dir", ".", "`Directory` where JSON results are stored/read")
-	proxies     = make([]string, 0)
-	httpMulties = make([]string, 0)
+	// MCP specific flags
+	mcpSessionsFlag = flag.Int("mcp-sessions", 1, "Number of MCP sessions per connection (default 1)")
+	mcpToolFlag     = flag.String("mcp-tool", "", "MCP tool name to call")
+	mcpArgsFlag     = flag.String("mcp-args", "{}", "MCP tool arguments as JSON string")
+	proxies         = make([]string, 0)
+	httpMulties     = make([]string, 0)
 
 	allowInitialErrorsFlag = flag.Bool("allow-initial-errors", false, "Allow and don't abort on initial warmup errors")
 	abortOnFlag            = flag.Int("abort-on", 0,
@@ -464,6 +470,21 @@ func fortioLoad(justCurl bool, percList []float64) {
 		o.Destination = url
 		o.Payload = httpOpts.Payload
 		res, err = udprunner.RunUDPTest(&o)
+	case strings.HasPrefix(url, mcprunner.MCPURLPrefix):
+		// Convert mcp:// URL to http:// (default to http:// if not specified)
+		mcpURL := "http://" + url[len(mcprunner.MCPURLPrefix):]
+		o := mcprunner.RunnerOptions{
+			RunnerOptions: ro,
+		}
+		o.URL = mcpURL
+		o.Tool = *mcpToolFlag
+		o.Args = *mcpArgsFlag
+		o.Sessions = *mcpSessionsFlag
+		o.ReqTimeout = httpOpts.HTTPReqTimeOut
+		if *mcpToolFlag == "" {
+			cli.ErrUsage("Error: MCP load testing requires --mcp-tool flag")
+		}
+		res, err = mcprunner.RunMCPTest(&o)
 	default:
 		o := fhttp.HTTPRunnerOptions{
 			HTTPOptions:        *httpOpts,
