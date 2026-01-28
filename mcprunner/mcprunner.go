@@ -15,6 +15,7 @@
 package mcprunner
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -22,6 +23,7 @@ import (
 	"io"
 	"net/http"
 	"sort"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -38,7 +40,7 @@ type JSONRPCRequest struct {
 	JSONRPC string      `json:"jsonrpc"`
 	Method  string      `json:"method"`
 	Params  interface{} `json:"params,omitempty"`
-	ID      interface{} `json:"id"`
+	ID      interface{} `json:"id,omitempty"` // omitted for notifications
 }
 
 // JSONRPCResponse represents a JSON-RPC 2.0 response.
@@ -93,6 +95,7 @@ type MCPClient struct {
 	args            map[string]interface{}
 	sessions        int
 	sessionIDs      []string
+	protocolVersion string // from server initialize result, sent on subsequent requests
 	currentSession  atomic.Int32
 	reqTimeout      time.Duration
 	requestIDBase   int64
@@ -179,7 +182,7 @@ func (c *MCPClient) Initialize(connID int) error {
 			ID:      c.nextRequestID(),
 		}
 
-		initResp, err := c.sendRequest(&initReq)
+		initResp, respHeaders, err := c.sendRequest(&initReq, nil)
 		if err != nil {
 			return fmt.Errorf("initialize request failed for session %d: %w", i, err)
 		}
@@ -193,19 +196,28 @@ func (c *MCPClient) Initialize(connID int) error {
 		if err := json.Unmarshal(initResp.Result, &initResult); err != nil {
 			return fmt.Errorf("failed to parse initialize response for session %d: %w", i, err)
 		}
+		c.protocolVersion = initResult.ProtocolVersion
 
-		// Store session identifier (use request ID as session ID for simplicity)
-		c.sessionIDs[i] = fmt.Sprintf("session-%d-%d", connID, i)
+		// Store session identifier from server or fallback to local id
+		if sid := respHeaders.Get("mcp-session-id"); sid != "" {
+			c.sessionIDs[i] = sid
+		} else {
+			c.sessionIDs[i] = fmt.Sprintf("session-%d-%d", connID, i)
+		}
 
-		// Send initialized notification
+		// Send initialized notification with MCP session headers
 		initializedNotif := JSONRPCRequest{
 			JSONRPC: "2.0",
 			Method:  "notifications/initialized",
 			Params:  map[string]interface{}{},
 		}
-
-		// Notifications don't have IDs and don't expect responses
-		if err := c.sendNotification(&initializedNotif); err != nil {
+		notifHeaders := map[string]string{
+			"mcp-protocol-version": initResult.ProtocolVersion,
+		}
+		if sid := respHeaders.Get("mcp-session-id"); sid != "" {
+			notifHeaders["mcp-session-id"] = sid
+		}
+		if err := c.sendNotification(&initializedNotif, notifHeaders); err != nil {
 			return fmt.Errorf("initialized notification failed for session %d: %w", i, err)
 		}
 
@@ -220,46 +232,85 @@ func (c *MCPClient) nextRequestID() int64 {
 	return c.requestIDBase + c.requestIDOffset.Add(1)
 }
 
-// sendRequest sends a JSON-RPC request and returns the response.
-func (c *MCPClient) sendRequest(req *JSONRPCRequest) (*JSONRPCResponse, error) {
+// parseSSEResponse reads a text/event-stream body and returns the first JSON-RPC response from a "data:" line.
+func parseSSEResponse(r io.Reader) (*JSONRPCResponse, error) {
+	scanner := bufio.NewScanner(r)
+	for scanner.Scan() {
+		line := scanner.Text()
+		if strings.HasPrefix(line, "data: ") {
+			jsonStr := strings.TrimPrefix(line, "data: ")
+			jsonStr = strings.TrimSpace(jsonStr)
+			if jsonStr == "" {
+				continue
+			}
+			var resp JSONRPCResponse
+			if err := json.Unmarshal([]byte(jsonStr), &resp); err != nil {
+				return nil, fmt.Errorf("failed to unmarshal SSE data line: %w", err)
+			}
+			return &resp, nil
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("failed to read SSE stream: %w", err)
+	}
+	return nil, fmt.Errorf("no data line in SSE response")
+}
+
+// sendRequest sends a JSON-RPC request and returns the response and response headers.
+// extraHeaders are optional (e.g. mcp-session-id, mcp-protocol-version).
+func (c *MCPClient) sendRequest(req *JSONRPCRequest, extraHeaders map[string]string) (*JSONRPCResponse, http.Header, error) {
 	reqBody, err := json.Marshal(req)
 	if err != nil {
-		return nil, fmt.Errorf("failed to marshal request: %w", err)
+		return nil, nil, fmt.Errorf("failed to marshal request: %w", err)
 	}
 
 	httpReq, err := http.NewRequest(http.MethodPost, c.url, bytes.NewReader(reqBody))
 	if err != nil {
-		return nil, fmt.Errorf("failed to create HTTP request: %w", err)
+		return nil, nil, fmt.Errorf("failed to create HTTP request: %w", err)
 	}
 
 	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Accept", "application/json, text/event-stream")
+	for k, v := range extraHeaders {
+		httpReq.Header.Set(k, v)
+	}
 
 	httpResp, err := c.httpClient.Do(httpReq)
 	if err != nil {
-		return nil, fmt.Errorf("HTTP request failed: %w", err)
+		return nil, nil, fmt.Errorf("HTTP request failed: %w", err)
 	}
 	defer httpResp.Body.Close()
 
 	if httpResp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(httpResp.Body)
-		return nil, fmt.Errorf("HTTP error %d: %s", httpResp.StatusCode, string(body))
+		return nil, nil, fmt.Errorf("HTTP error %d: %s", httpResp.StatusCode, string(body))
 	}
 
 	respBody, err := io.ReadAll(httpResp.Body)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read response body: %w", err)
+		return nil, nil, fmt.Errorf("failed to read response body: %w", err)
 	}
 
-	var resp JSONRPCResponse
-	if err := json.Unmarshal(respBody, &resp); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal response: %w", err)
+	contentType := httpResp.Header.Get("Content-Type")
+	var resp *JSONRPCResponse
+	if strings.Contains(contentType, "text/event-stream") {
+		resp, err = parseSSEResponse(bytes.NewReader(respBody))
+		if err != nil {
+			return nil, nil, err
+		}
+	} else {
+		var r JSONRPCResponse
+		if err := json.Unmarshal(respBody, &r); err != nil {
+			return nil, nil, fmt.Errorf("failed to unmarshal response: %w", err)
+		}
+		resp = &r
 	}
-
-	return &resp, nil
+	return resp, httpResp.Header.Clone(), nil
 }
 
 // sendNotification sends a JSON-RPC notification (no response expected).
-func (c *MCPClient) sendNotification(notif *JSONRPCRequest) error {
+// extraHeaders are optional MCP headers (e.g. mcp-session-id, mcp-protocol-version).
+func (c *MCPClient) sendNotification(notif *JSONRPCRequest, extraHeaders map[string]string) error {
 	reqBody, err := json.Marshal(notif)
 	if err != nil {
 		return fmt.Errorf("failed to marshal notification: %w", err)
@@ -271,6 +322,10 @@ func (c *MCPClient) sendNotification(notif *JSONRPCRequest) error {
 	}
 
 	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Accept", "application/json, text/event-stream")
+	for k, v := range extraHeaders {
+		httpReq.Header.Set(k, v)
+	}
 
 	httpResp, err := c.httpClient.Do(httpReq)
 	if err != nil {
@@ -278,13 +333,14 @@ func (c *MCPClient) sendNotification(notif *JSONRPCRequest) error {
 	}
 	defer httpResp.Body.Close()
 
-	// For notifications, we just check the status code
-	if httpResp.StatusCode != http.StatusOK && httpResp.StatusCode != http.StatusNoContent {
+	// For notifications, accept 200 OK, 202 Accepted, 204 No Content
+	if httpResp.StatusCode != http.StatusOK && httpResp.StatusCode != http.StatusAccepted && httpResp.StatusCode != http.StatusNoContent {
 		body, _ := io.ReadAll(httpResp.Body)
 		return fmt.Errorf("HTTP error %d: %s", httpResp.StatusCode, string(body))
 	}
 
-	// Note: response body is drained and closed by defer above
+	// Drain body (required for SSE streams and connection reuse)
+	_, _ = io.Copy(io.Discard, httpResp.Body)
 	return nil
 }
 
@@ -292,6 +348,15 @@ func (c *MCPClient) sendNotification(notif *JSONRPCRequest) error {
 func (c *MCPClient) CallTool() error {
 	// Round-robin through sessions (thread-safe)
 	sessionIdx := int(c.currentSession.Add(1)-1) % c.sessions
+
+	// MCP session headers required for tool calls
+	headers := make(map[string]string)
+	if c.protocolVersion != "" {
+		headers["mcp-protocol-version"] = c.protocolVersion
+	}
+	if sessionIdx < len(c.sessionIDs) && c.sessionIDs[sessionIdx] != "" {
+		headers["mcp-session-id"] = c.sessionIDs[sessionIdx]
+	}
 
 	// Prepare tool call request
 	toolParams := map[string]interface{}{
@@ -306,7 +371,7 @@ func (c *MCPClient) CallTool() error {
 		ID:      c.nextRequestID(),
 	}
 
-	resp, err := c.sendRequest(&toolReq)
+	resp, _, err := c.sendRequest(&toolReq, headers)
 	if err != nil {
 		return err
 	}
