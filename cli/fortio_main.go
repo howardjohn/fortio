@@ -471,12 +471,8 @@ func fortioLoad(justCurl bool, percList []float64) {
 		o.Payload = httpOpts.Payload
 		res, err = udprunner.RunUDPTest(&o)
 	case strings.HasPrefix(url, mcprunner.MCPURLPrefix):
-		// Convert mcp:// URL to http:// or https://
-		mcpURL := url
-		if strings.HasPrefix(url, mcprunner.MCPURLPrefix) {
-			// Default to http:// if not specified
-			mcpURL = "http://" + url[len(mcprunner.MCPURLPrefix):]
-		}
+		// Convert mcp:// URL to http:// (default to http:// if not specified)
+		mcpURL := "http://" + url[len(mcprunner.MCPURLPrefix):]
 		o := mcprunner.RunnerOptions{
 			RunnerOptions: ro,
 		}

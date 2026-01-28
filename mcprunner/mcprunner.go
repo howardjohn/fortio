@@ -93,7 +93,7 @@ type MCPClient struct {
 	args            map[string]interface{}
 	sessions        int
 	sessionIDs      []string
-	currentSession  int
+	currentSession  atomic.Int32
 	reqTimeout      time.Duration
 	requestIDBase   int64
 	requestIDOffset atomic.Int64
@@ -284,17 +284,14 @@ func (c *MCPClient) sendNotification(notif *JSONRPCRequest) error {
 		return fmt.Errorf("HTTP error %d: %s", httpResp.StatusCode, string(body))
 	}
 
-	// Drain the response body
-	_, _ = io.Copy(io.Discard, httpResp.Body)
-
+	// Note: response body is drained and closed by defer above
 	return nil
 }
 
 // CallTool performs a tool call using one of the initialized sessions.
 func (c *MCPClient) CallTool() error {
-	// Round-robin through sessions
-	sessionIdx := c.currentSession % c.sessions
-	c.currentSession++
+	// Round-robin through sessions (thread-safe)
+	sessionIdx := int(c.currentSession.Add(1)-1) % c.sessions
 
 	// Prepare tool call request
 	toolParams := map[string]interface{}{
@@ -395,7 +392,6 @@ func RunMCPTest(o *RunnerOptions) (*RunnerResults, error) {
 	keys := []string{}
 	for i := range numThreads {
 		mcpstate[i].client.Close()
-		total.SocketCount += numThreads // approximate socket count
 		for k := range mcpstate[i].RetCodes {
 			if _, exists := total.RetCodes[k]; !exists {
 				keys = append(keys, k)
@@ -403,6 +399,7 @@ func RunMCPTest(o *RunnerOptions) (*RunnerResults, error) {
 			total.RetCodes[k] += mcpstate[i].RetCodes[k]
 		}
 	}
+	total.SocketCount = numThreads // one per thread
 
 	// Cleanup
 	r.Options().ReleaseRunners()
